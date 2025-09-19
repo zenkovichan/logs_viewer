@@ -1,0 +1,68 @@
+{
+	"name": "homescapes-log-viewer",
+	"displayName": "Homescapes Log Viewer",
+	"description": "Панель VS Code для чтения и фильтрации логов Homescapes (log.txt + log.historyN.txt.zip)",
+	"version": "0.0.1",
+	"publisher": "local",
+	"engines": {
+		"vscode": "^1.82.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"activationEvents": [
+		"onStartupFinished",
+		"onView:logViewer.view",
+		"onCommand:logViewer.openFolder"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "logViewer.openFolder",
+				"title": "Homescapes Logs: Open Folder"
+			}
+		],
+		"menus": {
+			"view/title": [
+				{
+					"when": "view == logViewer.view",
+					"command": "logViewer.openFolder",
+					"group": "navigation@1"
+				}
+			]
+		},
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "logViewer",
+					"title": "Log Viewer",
+					"icon": "./media/icon.svg"
+				}
+			]
+		},
+		"views": {
+			"logViewer": [
+				{
+					"id": "logViewer.view",
+					"name": "Homescapes Logs",
+					"type": "webview"
+				}
+			]
+		}
+	},
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	},
+	"devDependencies": {
+		"@types/node": "^18.19.76",
+		"@types/vscode": "^1.82.0",
+		"typescript": "^5.5.4"
+	},
+	"dependencies": {
+		"adm-zip": "^0.5.10"
+	}
+}
+
