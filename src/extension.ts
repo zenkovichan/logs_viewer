@@ -9,6 +9,9 @@ export function activate(context: any): void {
 		}),
 		vscode.commands.registerCommand('logViewer.openFolder', async () => {
 			await provider.handleOpenFolder();
+		}),
+		vscode.window.onDidChangeVisibleTextEditors(() => {
+			// Reapply decorations when visible editors change
 		})
 	);
 }

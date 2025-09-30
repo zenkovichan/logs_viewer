@@ -20,7 +20,7 @@
 		"commands": [
 			{
 				"command": "logViewer.openFolder",
-				"title": "Homescapes Logs: Open Folder"
+				"title": "Homescapes Logs: Open Log File"
 			}
 		],
 		"menus": {

@@ -5,6 +5,7 @@
             "name": "Run Extension (LogViewer)",
             "type": "extensionHost",
             "request": "launch",
+            "preLaunchTask": "npm: compile",
             "args": [
                 "--extensionDevelopmentPath=${workspaceFolder}"
             ],
