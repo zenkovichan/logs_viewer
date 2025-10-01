@@ -52,17 +52,20 @@
 		}
 	},
 	"scripts": {
-		"vscode:prepublish": "npm run compile",
+		"vscode:prepublish": "npm run package",
 		"compile": "tsc -p ./",
-		"watch": "tsc -watch -p ./"
+		"watch": "tsc -watch -p ./",
+		"package": "node esbuild.js --production",
+		"esbuild": "node esbuild.js",
+		"esbuild-watch": "node esbuild.js --watch"
 	},
 	"devDependencies": {
 		"@types/node": "^18.19.76",
 		"@types/vscode": "^1.82.0",
+		"esbuild": "^0.25.10",
 		"typescript": "^5.5.4"
 	},
 	"dependencies": {
 		"adm-zip": "^0.5.10"
 	}
 }
-
