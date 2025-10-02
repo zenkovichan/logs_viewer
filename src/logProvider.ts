@@ -383,6 +383,16 @@ export class LogProvider {
 							updateRowDim();
 							
 							cb.addEventListener('change', ()=>{ 
+								// Если канал включается, включаем всех детей рекурсивно
+								if(cb.checked){
+									document.querySelectorAll('input[data-channel].styledCheck').forEach(c=>{ 
+										const channelId = c.getAttribute('data-channel');
+										if(channelId && channelId.startsWith(id + '>')){
+											c.checked = true;
+										}
+									});
+								}
+								
 								// Обновляем прозрачность и приглушение для всех дочерних каналов
 								document.querySelectorAll('input[data-channel].styledCheck').forEach(c=>{ 
 									const channelId = c.getAttribute('data-channel');

@@ -1,0 +1,120 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "npm: install",
+			"type": "npm",
+			"script": "install",
+			"problemMatcher": [],
+			"detail": "Установка зависимостей npm",
+			"group": {
+				"kind": "build",
+				"isDefault": false
+			},
+			"presentation": {
+				"reveal": "always",
+				"panel": "new"
+			}
+		},
+		{
+			"label": "npm: compile",
+			"type": "npm",
+			"script": "compile",
+			"problemMatcher": "$tsc",
+			"detail": "Компиляция TypeScript",
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"presentation": {
+				"reveal": "silent",
+				"panel": "shared"
+			}
+		},
+		{
+			"label": "npm: watch",
+			"type": "npm",
+			"script": "watch",
+			"isBackground": true,
+			"problemMatcher": "$tsc-watch",
+			"detail": "Компиляция TypeScript с отслеживанием изменений",
+			"group": "build",
+			"presentation": {
+				"reveal": "silent",
+				"panel": "dedicated"
+			}
+		},
+		{
+			"label": "npm: package (esbuild)",
+			"type": "npm",
+			"script": "package",
+			"problemMatcher": [],
+			"detail": "Сборка production версии через esbuild",
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared"
+			}
+		},
+		{
+			"label": "npm: esbuild-watch",
+			"type": "npm",
+			"script": "esbuild-watch",
+			"isBackground": true,
+			"problemMatcher": {
+				"owner": "esbuild",
+				"fileLocation": "relative",
+				"pattern": {
+					"regexp": "^([^\\s].*):(\\d+):(\\d+): error: (.*)$",
+					"file": 1,
+					"line": 2,
+					"column": 3,
+					"message": 4
+				},
+				"background": {
+					"activeOnStart": true,
+					"beginsPattern": "^.*watching for file changes.*$",
+					"endsPattern": "^.*✘ \\[ERROR\\].*$|^.*✓.*$"
+				}
+			},
+			"detail": "Сборка esbuild с отслеживанием изменений",
+			"group": "build",
+			"presentation": {
+				"reveal": "silent",
+				"panel": "dedicated"
+			}
+		},
+		{
+			"label": "vsce: package",
+			"type": "shell",
+			"command": "npx",
+			"args": [
+				"--yes",
+				"@vscode/vsce",
+				"package"
+			],
+			"problemMatcher": [],
+			"detail": "Создание VSIX пакета расширения (автоматически выполняет esbuild)",
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared"
+			}
+		},
+		{
+			"label": "Build Extension",
+			"dependsOn": [
+				"npm: compile",
+				"npm: package (esbuild)"
+			],
+			"problemMatcher": [],
+			"detail": "Полная сборка расширения (compile + esbuild)",
+			"group": "build",
+			"presentation": {
+				"reveal": "always",
+				"panel": "shared"
+			}
+		}
+	]
+}
+

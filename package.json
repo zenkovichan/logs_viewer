@@ -4,6 +4,10 @@
 	"description": "Панель VS Code для чтения и фильтрации логов Homescapes (log.txt + log.historyN.txt.zip)",
 	"version": "0.0.1",
 	"publisher": "local",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/local/homescapes-log-viewer"
+	},
 	"engines": {
 		"vscode": "^1.82.0"
 	},
