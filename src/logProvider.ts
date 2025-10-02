@@ -297,10 +297,57 @@ export class LogProvider {
 						return walk(node);
 					};
 					const channelsTreeDiv = document.getElementById('channelsTree');
-					// состояние видимости каналов
-					const selected = new Set();
-					const collectVisible=()=>{ selected.clear(); document.querySelectorAll('input[data-channel].styledCheck:checked').forEach(i=>selected.add(i.getAttribute('data-channel'))); };
-					const restoreVisible=()=>{ document.querySelectorAll('input[data-channel].styledCheck').forEach(i=>{ const id=i.getAttribute('data-channel'); i.checked = selected.size===0 ? true : selected.has(id); }); };
+					
+					// Независимое хранилище состояния каналов (true = включен, false = выключен)
+					const channelStates = new Map();
+					
+					// Инициализация всех каналов как включенных
+					const initializeChannelStates = () => {
+						for(const channelPath in channelColors){
+							if(!channelStates.has(channelPath)){
+								channelStates.set(channelPath, true);
+							}
+						}
+						// Добавляем специальный канал
+						if(!channelStates.has('(без канала)')){
+							channelStates.set('(без канала)', true);
+						}
+					};
+					initializeChannelStates();
+					
+					// Получить все дочерние пути канала
+					const getAllChildPaths = (parentPath) => {
+						const children = [];
+						for(const key in channelColors){
+							if(key.startsWith(parentPath + '>')){
+								children.push(key);
+							}
+						}
+						return children;
+					};
+					
+					// Установить состояние канала и всех его детей
+					const setChannelState = (channelPath, state) => {
+						channelStates.set(channelPath, state);
+						const children = getAllChildPaths(channelPath);
+						children.forEach(childPath => {
+							channelStates.set(childPath, state);
+						});
+					};
+					
+					// Получить состояние канала
+					const getChannelState = (channelPath) => {
+						return channelStates.has(channelPath) ? channelStates.get(channelPath) : true;
+					};
+					
+					// Получить список активных каналов для фильтрации
+					const getActiveChannels = () => {
+						const active = [];
+						for(const [path, state] of channelStates.entries()){
+							if(state) active.push(path);
+						}
+						return active;
+					};
 					// управление root checkbox
 					const rootEye = document.getElementById('rootEye');
 					rootEye.addEventListener('click', (e)=>{
@@ -308,6 +355,13 @@ export class LogProvider {
 					});
 					rootEye.addEventListener('change', ()=>{
 						const rootVisible = rootEye.checked;
+						
+						// Обновляем состояние всех каналов
+						for(const channelPath of channelStates.keys()){
+							channelStates.set(channelPath, rootVisible);
+						}
+						
+						// Обновляем DOM
 						document.querySelectorAll('input[data-channel].styledCheck').forEach(function(c){ 
 							c.checked = rootVisible; 
 							c.style.opacity = '1'; // Все видны, если все включены/выключены
@@ -352,10 +406,10 @@ export class LogProvider {
 							cb.type='checkbox';
 							cb.className='styledCheck';
 							cb.setAttribute('data-channel', id);
-							cb.checked = selected.size===0 ? true : selected.has(id);
+							cb.checked = getChannelState(id);
 							cb.title='Видимость канала';
 							
-							// Проверка, включены ли все родители
+							// Проверка, включены ли все родители (по состоянию, а не по DOM)
 							const checkParentsEnabled=()=>{
 								// Для специального канала "(без канала)" не проверяем родителей
 								if(id === '(без канала)') return true;
@@ -363,8 +417,7 @@ export class LogProvider {
 								const parts = id.split('>');
 								for(let i = 0; i < parts.length - 1; i++){
 									const parentPath = parts.slice(0, i + 1).join('>');
-									const parentCb = document.querySelector('input[data-channel="' + parentPath + '"].styledCheck');
-									if(parentCb && !parentCb.checked) return false;
+									if(!getChannelState(parentPath)) return false;
 								}
 								return true;
 							};
@@ -383,33 +436,31 @@ export class LogProvider {
 							updateRowDim();
 							
 							cb.addEventListener('change', ()=>{ 
-								// Если канал включается, включаем всех детей рекурсивно
-								if(cb.checked){
-									document.querySelectorAll('input[data-channel].styledCheck').forEach(c=>{ 
-										const channelId = c.getAttribute('data-channel');
-										if(channelId && channelId.startsWith(id + '>')){
-											c.checked = true;
-										}
-									});
-								}
+								// Обновляем состояние канала и всех его детей в Map
+								setChannelState(id, cb.checked);
 								
-								// Обновляем прозрачность и приглушение для всех дочерних каналов
+								// Обновляем DOM для видимых элементов
 								document.querySelectorAll('input[data-channel].styledCheck').forEach(c=>{ 
 									const channelId = c.getAttribute('data-channel');
-									if(channelId && channelId.startsWith(id + '>')){
+									if(channelId){
+										// Обновляем чекбокс если это дочерний канал
+										if(channelId.startsWith(id + '>')){
+											c.checked = getChannelState(channelId);
+										}
+										
+										// Обновляем прозрачность (проверка родителей)
 										const checkP = ()=>{
 											if(channelId === '(без канала)') return true;
 											const parts = channelId.split('>');
 											for(let i = 0; i < parts.length - 1; i++){
 												const parentPath = parts.slice(0, i + 1).join('>');
-												const parentCb = document.querySelector('input[data-channel="' + parentPath + '"].styledCheck');
-												if(parentCb && !parentCb.checked) return false;
+												if(!getChannelState(parentPath)) return false;
 											}
 											return true;
 										};
 										c.style.opacity = checkP() ? '1' : '0.3';
 										
-										// Обновляем приглушение строки дочернего канала
+										// Обновляем приглушение строки
 										const childLi = c.closest('li');
 										if(childLi){
 											if(!c.checked || !checkP()){
@@ -432,52 +483,49 @@ export class LogProvider {
 							soloBtn.title='Только этот канал';
 							soloBtn.textContent = 'S';
 							soloBtn.addEventListener('click', ()=>{
-								// Выключаем все каналы
-								document.querySelectorAll('input[data-channel].styledCheck').forEach(c=>{ c.checked = false; });
+								// Выключаем все каналы в Map
+								for(const channelPath of channelStates.keys()){
+									channelStates.set(channelPath, false);
+								}
 								
-								// Включаем этот канал
-								cb.checked = true;
+								// Включаем этот канал и всех его детей
+								setChannelState(id, true);
 								
 								// Включаем всех родителей (только если не "(без канала)")
 								if(id !== '(без канала)'){
 									const parts = id.split('>');
 									for(let i = 0; i < parts.length - 1; i++){
 										const parentPath = parts.slice(0, i + 1).join('>');
-										const parentCb = document.querySelector('input[data-channel="' + parentPath + '"].styledCheck');
-										if(parentCb) parentCb.checked = true;
+										channelStates.set(parentPath, true);
 									}
 								}
 								
-								// Включаем всех детей (и детей детей рекурсивно)
+								// Обновляем DOM для всех видимых каналов
 								document.querySelectorAll('input[data-channel].styledCheck').forEach(c=>{
 									const channelId = c.getAttribute('data-channel');
-									if(channelId && channelId.startsWith(id + '>')){
-										c.checked = true;
-									}
-								});
-								
-								// Обновляем прозрачность и приглушение всех чекбоксов
-								document.querySelectorAll('input[data-channel].styledCheck').forEach(c=>{ 
-									const channelId = c.getAttribute('data-channel');
-									const checkP = ()=>{
-										if(channelId === '(без канала)') return true;
-										const parts = channelId.split('>');
-										for(let i = 0; i < parts.length - 1; i++){
-											const parentPath = parts.slice(0, i + 1).join('>');
-											const parentCb = document.querySelector('input[data-channel="' + parentPath + '"].styledCheck');
-											if(parentCb && !parentCb.checked) return false;
-										}
-										return true;
-									};
-									c.style.opacity = checkP() ? '1' : '0.3';
-									
-									// Обновляем приглушение строки
-									const channelLi = c.closest('li');
-									if(channelLi){
-										if(!c.checked || !checkP()){
-											channelLi.classList.add('dimmed');
-										} else {
-											channelLi.classList.remove('dimmed');
+									if(channelId){
+										c.checked = getChannelState(channelId);
+										
+										// Обновляем прозрачность
+										const checkP = ()=>{
+											if(channelId === '(без канала)') return true;
+											const parts = channelId.split('>');
+											for(let i = 0; i < parts.length - 1; i++){
+												const parentPath = parts.slice(0, i + 1).join('>');
+												if(!getChannelState(parentPath)) return false;
+											}
+											return true;
+										};
+										c.style.opacity = checkP() ? '1' : '0.3';
+										
+										// Обновляем приглушение строки
+										const channelLi = c.closest('li');
+										if(channelLi){
+											if(!c.checked || !checkP()){
+												channelLi.classList.add('dimmed');
+											} else {
+												channelLi.classList.remove('dimmed');
+											}
 										}
 									}
 								});
@@ -523,8 +571,6 @@ export class LogProvider {
 						container.appendChild(ul);
 					};
 					const apply=()=>{
-						collectVisible();
-						
 						// Обновляем прозрачность и приглушение всех чекбоксов каналов
 						document.querySelectorAll('input[data-channel].styledCheck').forEach(c=>{ 
 							const channelId = c.getAttribute('data-channel');
@@ -536,8 +582,7 @@ export class LogProvider {
 									const parts = channelId.split('>');
 									for(let i = 0; i < parts.length - 1; i++){
 										const parentPath = parts.slice(0, i + 1).join('>');
-										const parentCb = document.querySelector('input[data-channel="' + parentPath + '"].styledCheck');
-										if(parentCb && !parentCb.checked) return false;
+										if(!getChannelState(parentPath)) return false;
 									}
 									return true;
 								};
@@ -556,20 +601,19 @@ export class LogProvider {
 						});
 						
 						const levels=[...document.querySelectorAll('input[data-level].styledCheck')].filter(i=>i.checked).map(i=>i.getAttribute('data-level'));
-						const channels=[...document.querySelectorAll('input[data-channel].styledCheck')].filter(i=>i.checked).map(i=>i.getAttribute('data-channel'));
+						const channels=getActiveChannels(); // Берем из Map вместо DOM
 						const sessionsSel=[...document.querySelectorAll('input[data-session].styledCheck')].filter(i=>i.checked).map(i=>Number(i.getAttribute('data-session')));
 						const text=(document.getElementById('textFilter')).value || '';
 						vscode.postMessage({ type:'applyFilters', payload:{ levels, channels, sessions: sessionsSel, text }});
 					};
 					const rerenderChannels=()=>{
-						collectVisible();
+						// Перерисовываем дерево
 						channelsTreeDiv.innerHTML='';
 						const q=(document.getElementById('channelFilter')||{value:''}).value;
 						const filtered = filterTree(channelsData, q);
 						renderTree(filtered, channelsTreeDiv);
-						restoreVisible();
 						
-						// Обновляем прозрачность и приглушение всех чекбоксов после перерисовки
+						// После перерисовки обновляем прозрачность и приглушение
 						document.querySelectorAll('input[data-channel].styledCheck').forEach(c=>{ 
 							const channelId = c.getAttribute('data-channel');
 							if(channelId){
@@ -580,8 +624,7 @@ export class LogProvider {
 									const parts = channelId.split('>');
 									for(let i = 0; i < parts.length - 1; i++){
 										const parentPath = parts.slice(0, i + 1).join('>');
-										const parentCb = document.querySelector('input[data-channel="' + parentPath + '"].styledCheck');
-										if(parentCb && !parentCb.checked) return false;
+										if(!getChannelState(parentPath)) return false;
 									}
 									return true;
 								};
