@@ -25,11 +25,20 @@ interface LogMessage {
 	text: string; // full message including following lines until next timestamp
 }
 
+interface StateTransition {
+	messageIndex: number;
+	timestamp: string;
+	from: string;
+	to: string;
+}
+
 interface AppSession {
 	index: number;
 	startLine: number;
 	startOffset: number;
 	firstMessageTimestamp: string | null;
+	buildVersion?: string | null;
+	transitions?: StateTransition[];
 }
 
 export class LogProvider {
@@ -47,9 +56,16 @@ export class LogProvider {
 	private output: vscode.OutputChannel = vscode.window.createOutputChannel('Homescapes Log Viewer');
 	private decorationTypes: vscode.TextEditorDecorationType[] = [];
 	private documentChangeListener: vscode.Disposable | null = null;
+	private tsToIndices: Map<string, number[]> = new Map();
+	private transitionMessageIndices: Set<number> = new Set();
 
 	public constructor(context: any) {
 		this.context = context;
+		this.context.subscriptions.push(
+			vscode.window.onDidChangeTextEditorSelection(() => {
+				this.handleSelectionChange();
+			})
+		);
 	}
 
 	public resolveWebviewView(webviewView: any): void {
@@ -69,6 +85,9 @@ export class LogProvider {
 					break;
 				case 'jumpToChannel':
 					await this.revealChannel(String(msg.payload?.path || ''));
+					break;
+				case 'jumpToTransition':
+					await this.revealTransition(Number(msg.payload?.messageIndex));
 					break;
 			}
 		});
@@ -247,7 +266,15 @@ export class LogProvider {
 				.level-btn.level-D{ background-color: rgba(79, 193, 255, 0.3); border-color: rgba(79, 193, 255, 0.5); }
 				.level-btn.level-NONE{ background-color: rgba(255, 255, 255, 0.5); border-color: rgba(255, 255, 255, 0.8); }
 				.level-indicator{ font-family: monospace; font-weight:bold; color: var(--vscode-editor-foreground); }
-				.count{ opacity:0.8; font-size:11px; margin-left:auto; }`;
+				.count{ opacity:0.8; font-size:11px; margin-left:auto; }
+				.sessions .row .left .dot{ width:8px; height:8px; border-radius:50%; background:transparent; border:1px solid transparent; display:inline-block; }
+				.sessions .row .left .dot.active{ background:#ff3b30; border-color:#ff3b30; }
+				.sessions ul.transitions{ list-style:none; padding-left:20px; margin:4px 0 0; }
+				.sessions li.transition-row{ display:flex; align-items:center; gap:8px; padding:2px 0; }
+				.sessions li.transition-row .dot{ width:6px; height:6px; border-radius:50%; background:transparent; border:1px solid transparent; display:inline-block; }
+				.sessions li.transition-row .dot.active{ background:#ff3b30; border-color:#ff3b30; }
+				.sessions li.transition-row .transition-jump{ background:transparent; border:none; color: var(--vscode-foreground); cursor:pointer; text-align:left; padding:0; }
+				`;
 	}
 
 	/**
@@ -262,6 +289,7 @@ export class LogProvider {
 					const sessions = ${JSON.stringify(data.sessions)};
 					const channelColors = ${JSON.stringify(data.channelColors)};
 					const clone = (obj)=>JSON.parse(JSON.stringify(obj));
+					let activeLocation = null; // { sessionIndex, transitionMessageIndex? }
 					// Handle messages from extension
 					window.addEventListener('message', event => {
 						const message = event.data;
@@ -279,6 +307,9 @@ export class LogProvider {
 									}
 								}
 							}
+						} else if (message.type === 'activeLocation') {
+							activeLocation = message.payload || null;
+							updateActiveDots();
 						}
 					});
 					const filterTree = (node, query)=>{
@@ -647,11 +678,19 @@ export class LogProvider {
 					sessionsDiv.className = 'sessions';
 					sessionsDiv.innerHTML='';
 					
-					sessions.forEach(s=>{
-						const row=document.createElement('div');
-						row.className='row';
+					const renderSessions = () => {
+						sessionsDiv.innerHTML='';
+						sessions.forEach(s=>{
+							const node=document.createElement('div');
+							node.className='session-node';
+							node.setAttribute('data-session-index', String(s.index));
+							const row=document.createElement('div');
+							row.className='row';
 						const left=document.createElement('div');
 						left.className='left';
+							const dot=document.createElement('span');
+							dot.className='dot';
+							left.appendChild(dot);
 						
 						// Чекбокс для видимости запуска
 						const cb=document.createElement('input');
@@ -686,9 +725,25 @@ export class LogProvider {
 						});
 						left.appendChild(soloBtn);
 						
+						const labelContainer=document.createElement('div');
+						labelContainer.style.display='flex';
+						labelContainer.style.flexDirection='column';
+						labelContainer.style.gap='2px';
+						
 						const label=document.createElement('span');
 						label.textContent = '#' + s.index + ' — ' + (s.firstMessageTimestamp ?? 'n/a');
-						left.appendChild(label);
+						labelContainer.appendChild(label);
+						
+						// Добавляем Build version если есть
+						if(s.buildVersion){
+							const buildLabel=document.createElement('span');
+							buildLabel.textContent = 'Build: ' + s.buildVersion;
+							buildLabel.style.fontSize = '11px';
+							buildLabel.style.opacity = '0.8';
+							labelContainer.appendChild(buildLabel);
+						}
+						
+						left.appendChild(labelContainer);
 						row.appendChild(left);
 						
 						const right=document.createElement('div');
@@ -704,9 +759,56 @@ export class LogProvider {
 						btn.addEventListener('click', ()=>{ vscode.postMessage({ type:'jumpToSession', payload: { index: Number(btn.getAttribute('data-jump')) }}); });
 						right.appendChild(btn);
 						
-						row.appendChild(right);
-						sessionsDiv.appendChild(row);
-					});
+							row.appendChild(right);
+							node.appendChild(row);
+
+							// Дочерние переходы состояний
+							const transitions = Array.isArray(s.transitions) ? s.transitions : [];
+							if (transitions.length > 0){
+								const children = document.createElement('div');
+								children.className = 'children';
+								const list = document.createElement('ul');
+								list.className = 'transitions';
+								transitions.forEach(tr=>{
+									const li = document.createElement('li');
+									li.className = 'transition-row';
+									li.setAttribute('data-transition-msg', String(tr.messageIndex));
+									const d = document.createElement('span');
+									d.className = 'dot';
+									li.appendChild(d);
+									const text = document.createElement('button');
+									text.className = 'transition-jump';
+									text.textContent = '[' + tr.timestamp + '] ' + tr.from + ' → ' + tr.to;
+									text.addEventListener('click', ()=>{
+										vscode.postMessage({ type:'jumpToTransition', payload:{ messageIndex: tr.messageIndex }});
+									});
+									li.appendChild(text);
+									list.appendChild(li);
+								});
+								children.appendChild(list);
+								node.appendChild(children);
+							}
+							sessionsDiv.appendChild(node);
+						});
+						updateActiveDots();
+					};
+					renderSessions();
+					
+					function updateActiveDots(){
+						// Сбрасываем активные точки
+						document.querySelectorAll('.sessions .row .dot, .sessions .transition-row .dot').forEach(el=>{
+							el.classList.remove('active');
+						});
+						if (!activeLocation) return;
+						// Ставим точку на запуске
+						const row = document.querySelector('.sessions .session-node[data-session-index="' + activeLocation.sessionIndex + '"] .row .dot');
+						if (row) row.classList.add('active');
+						// И на переходе, если есть
+						if (activeLocation.transitionMessageIndex !== undefined){
+							const trDot = document.querySelector('.sessions .session-node[data-session-index="' + activeLocation.sessionIndex + '"] li.transition-row[data-transition-msg="' + activeLocation.transitionMessageIndex + '"] .dot');
+							if (trDot) trDot.classList.add('active');
+						}
+					}
 					
 					// обработчики фильтров уровней
 					document.querySelectorAll('input[data-level].styledCheck').forEach(cb=>{
@@ -990,6 +1092,8 @@ ${this.generateStyles()}
 	private parseCombined(content: string): void {
 		this.parsed = [];
 		this.sessions = [];
+		this.tsToIndices.clear();
+		this.transitionMessageIndices.clear();
 		this.channelsTree.clear();
 		this.channelColors.clear();
 		// Очистим вывод перед новым парсингом
@@ -1005,11 +1109,27 @@ ${this.generateStyles()}
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
 			if (startRegex.test(line)) {
+				// Ищем Build version в следующих строках до следующего APP STARTED
+				let buildVersion: string | null = null;
+				for (let j = i + 1; j < lines.length; j++) {
+					// Если встретили следующий APP STARTED - останавливаемся
+					if (startRegex.test(lines[j])) {
+						break;
+					}
+					// Ищем строку "Build version:"
+					const buildMatch = lines[j].match(/Build version:\s*(.+)/);
+					if (buildMatch) {
+						buildVersion = buildMatch[1].trim();
+						break;
+					}
+				}
+				
 				this.sessions.push({ 
 					index: ++sessionIndex, 
 					startLine: currentLineInOriginal, 
 					startOffset: index, 
-					firstMessageTimestamp: null 
+					firstMessageTimestamp: null,
+					buildVersion: buildVersion
 				});
 				currentLineInOriginal++;
 				continue;
@@ -1045,6 +1165,9 @@ ${this.generateStyles()}
 				}
 				const textHead = rest.trimStart();
 				current = { index: index++, timestamp, level, channels, text: textHead };
+				// Индексируем таймстамп для быстрого поиска по курсору
+				if (!this.tsToIndices.has(timestamp)) this.tsToIndices.set(timestamp, []);
+				this.tsToIndices.get(timestamp)!.push(current.index);
 
 				// Лог: строка и распарсенные каналы
 				this.output.appendLine(`line ${i + 1}: ${channels.length ? channels.join('>') : '(none)'}`);
@@ -1082,6 +1205,27 @@ ${this.generateStyles()}
 			}
 		}
 		if (current) this.parsed.push(current);
+
+		// После заполнения parsed и sessions — выделяем переходы состояний
+		const isGSM = (chs: string[]) => chs.includes('GameStateManager');
+		const isChanged = (chs: string[]) => chs.includes('GameStateChanged');
+		const re = /^From\s+(.+?)\s+to\s+(.+)$/;
+		for (const msg of this.parsed){
+			if (isGSM(msg.channels) && isChanged(msg.channels)){
+				const m2 = msg.text.match(re);
+				if (m2){
+					const from = m2[1];
+					const to = m2[2];
+					const sid = this.getSessionByMessageIndex(msg.index);
+					const s = this.sessions.find(s=>s.index===sid);
+					if (s){
+						if (!s.transitions) s.transitions = [];
+						s.transitions.push({ messageIndex: msg.index, timestamp: msg.timestamp, from, to });
+						this.transitionMessageIndices.add(msg.index);
+					}
+				}
+			}
+		}
 		// Итоговую статистику не выводим, чтобы не засорять лог
 	}
 
@@ -1175,6 +1319,8 @@ ${this.generateStyles()}
 		if (pos >= 0) {
 			const start = doc.positionAt(pos);
 			editor.revealRange(new vscode.Range(start, start), vscode.TextEditorRevealType.AtTop);
+			// Обновим красную точку: только на запуске
+			this.postActiveLocation({ sessionIndex });
 		}
 	}
 
@@ -1196,6 +1342,23 @@ ${this.generateStyles()}
 			editor.selections = [new vscode.Selection(start, end)];
 			// Мягко сбросим выделение через короткую задержку, чтобы не мешать работе
 			setTimeout(()=>{ editor.selections = [new vscode.Selection(start, start)]; }, 800);
+		}
+	}
+
+	private async revealTransition(messageIndex: number): Promise<void> {
+		if (!this.combinedPath) return;
+		const msg = this.parsed.find(m => m.index === messageIndex);
+		if (!msg) return;
+		const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(this.combinedPath));
+		const editor = await vscode.window.showTextDocument(doc, { preview: false });
+		const text = doc.getText();
+		const pos = text.indexOf(`[${msg.timestamp}]`);
+		if (pos >= 0) {
+			const start = doc.positionAt(pos);
+			editor.revealRange(new vscode.Range(start, start), vscode.TextEditorRevealType.AtTop);
+			// Обновим красную точку: на запуске и на переходе
+			const sid = this.getSessionByMessageIndex(messageIndex);
+			this.postActiveLocation({ sessionIndex: sid, transitionMessageIndex: messageIndex });
 		}
 	}
 
@@ -1383,6 +1546,57 @@ ${this.generateStyles()}
 			for (const { type, ranges } of channelDecorationsByColor.values()) {
 				editor.setDecorations(type, ranges);
 			}
+		}
+	}
+
+	// ==================== Cursor Tracking / Active Location ====================
+
+	private postActiveLocation(payload: { sessionIndex: number; transitionMessageIndex?: number } | null): void {
+		if (!this.view) return;
+		this.view.webview.postMessage({ type: 'activeLocation', payload });
+	}
+
+	private handleSelectionChange(): void {
+		try{
+			if (!this.combinedPath) { this.postActiveLocation(null); return; }
+			const editor = vscode.window.activeTextEditor;
+			if (!editor || editor.document.uri.fsPath !== this.combinedPath) { this.postActiveLocation(null); return; }
+			const pos = editor.selection.active;
+			// Идем вверх по строкам, пока не найдем заголовок сообщения
+			const headPrefixRegex = /^\[(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\]\[(.)\]/;
+			let lineIdx = pos.line;
+			let ts: string | null = null;
+			while (lineIdx >= 0){
+				const lineText = editor.document.lineAt(lineIdx).text;
+				const m = lineText.match(headPrefixRegex);
+				if (m){ ts = m[1]; break; }
+				lineIdx--;
+			}
+			if (!ts) { this.postActiveLocation(null); return; }
+			// Мапа ts -> индексы сообщений
+			const candidates = this.tsToIndices.get(ts) || [];
+			if (candidates.length === 0) { this.postActiveLocation(null); return; }
+			// Разрешаем неоднозначность таймстампов: считаем порядковый номер в документе до текущего заголовка
+			let occurrence = 0;
+			for (let i = 0; i <= lineIdx; i++){
+				const t = editor.document.lineAt(i).text.match(headPrefixRegex);
+				if (t && t[1] === ts) occurrence++;
+			}
+			const targetIndex = candidates[Math.max(0, Math.min(candidates.length - 1, occurrence - 1))];
+			// Получим сессию
+			const sid = this.getSessionByMessageIndex(targetIndex);
+			let transitionIdx: number | undefined = undefined;
+			const s = this.sessions.find(s => s.index === sid);
+			if (s && Array.isArray(s.transitions) && s.transitions.length > 0){
+				// Берем последний переход в этой сессии, индекс которого <= текущего сообщения
+				for (let i = s.transitions.length - 1; i >= 0; i--){
+					const t = s.transitions[i];
+					if (t.messageIndex <= targetIndex){ transitionIdx = t.messageIndex; break; }
+				}
+			}
+			this.postActiveLocation({ sessionIndex: sid, transitionMessageIndex: transitionIdx });
+		} catch {
+			this.postActiveLocation(null);
 		}
 	}
 }
