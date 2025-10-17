@@ -98,14 +98,19 @@ export class LogProvider {
 			canSelectFolders: false, 
 			canSelectFiles: true, 
 			canSelectMany: false,
-			filters: { 'Log Files': ['txt'] }
+			filters: { 'Log Files': ['txt', 'zip'] }
 		});
 		if (!files || files.length === 0) {
 			return;
 		}
 		const selectedFile = files[0].fsPath;
 		this.workspaceFolder = path.dirname(selectedFile);
-		await this.combineLogs();
+		
+		// Сохраняем информацию о выбранном файле
+		const selectedFileName = path.basename(selectedFile);
+		const isZipFile = selectedFileName.toLowerCase().endsWith('.zip');
+		
+		await this.combineLogs(isZipFile ? selectedFile : null);
 		await this.openCombined();
 		// Применяем декорации с небольшой задержкой
 		setTimeout(() => {
@@ -1049,32 +1054,78 @@ ${this.generateStyles()}
 
 	// ==================== Log Reading and Parsing Functions ====================
 
-	private async combineLogs(): Promise<void> {
+	private async combineLogs(zipFilePath: string | null = null): Promise<void> {
 		if (!this.workspaceFolder) return;
 		const dir = this.workspaceFolder;
-		const files = fs.readdirSync(dir).filter((f: string) => f === 'log.txt' || /^log\.history\d+\.txt\.zip$/.test(f));
-		// Требуемый порядок: history от большего к меньшему, затем log.txt
-		const history = files.filter((f: string) => f.startsWith('log.history')).sort((a: string, b: string)=>{
-			const na = Number(a.match(/history(\d+)/)?.[1] ?? 0);
-			const nb = Number(b.match(/history(\d+)/)?.[1] ?? 0);
-			return nb - na; // По убыванию (от большего к меньшему)
-		});
 		const combinedParts: string[] = [];
 		
-		// Сначала добавляем history файлы от большего к меньшему
-		for (const z of history) {
-			const zip = new AdmZip(path.join(dir, z));
-			const entry = zip.getEntry('log.txt');
-			if (entry) {
-				const content = zip.readAsText(entry, 'utf8');
-				combinedParts.push(`\n===== BEGIN PART: ${z}::log.txt =====\n` + content + `\n===== END PART: ${z}::log.txt =====\n`);
+		if (zipFilePath) {
+			// Режим работы с .zip архивом
+			const zip = new AdmZip(zipFilePath);
+			const zipEntries = zip.getEntries();
+			
+			// Ищем log.txt в корне архива
+			const mainLogEntry = zip.getEntry('log.txt');
+			
+			// Ищем вложенные log.historyХ.txt.zip
+			const historyZipEntries = zipEntries.filter((entry: any) => 
+				/^log\.history\d+\.txt\.zip$/.test(entry.entryName)
+			);
+			
+			// Сортируем history файлы от большего к меньшему
+			historyZipEntries.sort((a: any, b: any) => {
+				const na = Number(a.entryName.match(/history(\d+)/)?.[1] ?? 0);
+				const nb = Number(b.entryName.match(/history(\d+)/)?.[1] ?? 0);
+				return nb - na;
+			});
+			
+			// Сначала добавляем вложенные history архивы
+			for (const historyEntry of historyZipEntries) {
+				try {
+					const historyZipData = zip.readFile(historyEntry);
+					if (historyZipData) {
+						const historyZip = new AdmZip(historyZipData);
+						const historyLogEntry = historyZip.getEntry('log.txt');
+						if (historyLogEntry) {
+							const content = historyZip.readAsText(historyLogEntry, 'utf8');
+							combinedParts.push(`\n===== BEGIN PART: ${historyEntry.entryName}::log.txt =====\n` + content + `\n===== END PART: ${historyEntry.entryName}::log.txt =====\n`);
+						}
+					}
+				} catch (err) {
+					console.error(`Ошибка при чтении ${historyEntry.entryName}:`, err);
+				}
 			}
-		}
-		
-		// Затем добавляем текущий log.txt
-		const currentLogPath = path.join(dir, 'log.txt');
-		if (fs.existsSync(currentLogPath)) {
-			combinedParts.push(`\n===== BEGIN PART: log.txt =====\n` + fs.readFileSync(currentLogPath, 'utf8') + `\n===== END PART: log.txt =====\n`);
+			
+			// Затем добавляем основной log.txt
+			if (mainLogEntry) {
+				const content = zip.readAsText(mainLogEntry, 'utf8');
+				combinedParts.push(`\n===== BEGIN PART: log.txt =====\n` + content + `\n===== END PART: log.txt =====\n`);
+			}
+		} else {
+			// Режим работы с .txt файлом (старая логика)
+			const files = fs.readdirSync(dir).filter((f: string) => f === 'log.txt' || /^log\.history\d+\.txt\.zip$/.test(f));
+			// Требуемый порядок: history от большего к меньшему, затем log.txt
+			const history = files.filter((f: string) => f.startsWith('log.history')).sort((a: string, b: string)=>{
+				const na = Number(a.match(/history(\d+)/)?.[1] ?? 0);
+				const nb = Number(b.match(/history(\d+)/)?.[1] ?? 0);
+				return nb - na; // По убыванию (от большего к меньшему)
+			});
+			
+			// Сначала добавляем history файлы от большего к меньшему
+			for (const z of history) {
+				const zip = new AdmZip(path.join(dir, z));
+				const entry = zip.getEntry('log.txt');
+				if (entry) {
+					const content = zip.readAsText(entry, 'utf8');
+					combinedParts.push(`\n===== BEGIN PART: ${z}::log.txt =====\n` + content + `\n===== END PART: ${z}::log.txt =====\n`);
+				}
+			}
+			
+			// Затем добавляем текущий log.txt
+			const currentLogPath = path.join(dir, 'log.txt');
+			if (fs.existsSync(currentLogPath)) {
+				combinedParts.push(`\n===== BEGIN PART: log.txt =====\n` + fs.readFileSync(currentLogPath, 'utf8') + `\n===== END PART: log.txt =====\n`);
+			}
 		}
 		
 		const combined = combinedParts.join('\n');

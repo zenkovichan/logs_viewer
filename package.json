@@ -1,7 +1,7 @@
 {
 	"name": "homescapes-log-viewer",
 	"displayName": "Homescapes Log Viewer",
-	"description": "Панель VS Code для чтения и фильтрации логов Homescapes (log.txt + log.historyN.txt.zip)",
+	"description": "Панель VS Code для чтения и фильтрации логов Homescapes (log.txt + log.historyN.txt.zip + архивы .zip)",
 	"version": "0.0.1",
 	"publisher": "local",
 	"repository": {
