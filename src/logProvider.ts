@@ -58,14 +58,64 @@ export class LogProvider {
 	private documentChangeListener: vscode.Disposable | null = null;
 	private tsToIndices: Map<string, number[]> = new Map();
 	private transitionMessageIndices: Set<number> = new Set();
+	private lastDecoratedVersion: number = -1; // Версия документа, к которой применены декорации
+	private decorationTimeout: NodeJS.Timeout | null = null; // Таймаут для дебаунса
+	private isApplyingDecorations: boolean = false; // Флаг процесса применения
 
 	public constructor(context: any) {
 		this.context = context;
 		this.context.subscriptions.push(
 			vscode.window.onDidChangeTextEditorSelection(() => {
 				this.handleSelectionChange();
+			}),
+			vscode.window.onDidChangeVisibleTextEditors((editors) => {
+				// Применяем декорации когда combined_logs.txt становится видимым
+				this.applyDecorationsIfNeeded();
+			}),
+			vscode.workspace.onDidChangeTextDocument((event) => {
+				// Если изменился combined_logs.txt, переприменяем декорации
+				if (this.combinedPath && event.document.uri.fsPath === this.combinedPath) {
+					this.scheduleDecorationsReapply();
+				}
 			})
 		);
+	}
+	
+	/**
+	 * Планирует повторное применение декораций с дебаунсом
+	 */
+	private scheduleDecorationsReapply(): void {
+		if (this.decorationTimeout) {
+			clearTimeout(this.decorationTimeout);
+		}
+		this.decorationTimeout = setTimeout(() => {
+			this.applyDecorationsIfNeeded();
+		}, 500); // Ждем 500ms после последнего изменения
+	}
+	
+	/**
+	 * Применяет декорации если открыт combined_logs.txt и они еще не применены
+	 */
+	private applyDecorationsIfNeeded(): void {
+		if (!this.combinedPath || this.isApplyingDecorations) return;
+		
+		const editor = vscode.window.visibleTextEditors.find(
+			(e: vscode.TextEditor) => e.document.uri.fsPath === this.combinedPath
+		);
+		
+		if (!editor) return;
+		
+		// Проверяем, нужно ли обновлять декорации
+		const currentVersion = editor.document.version;
+		if (this.lastDecoratedVersion === currentVersion && this.decorationTypes.length > 0) {
+			// Декорации уже применены к этой версии документа
+			return;
+		}
+		
+		// Даем время на загрузку документа
+		setTimeout(() => {
+			this.applyDecorations();
+		}, 100);
 	}
 
 	public resolveWebviewView(webviewView: any): void {
@@ -94,6 +144,10 @@ export class LogProvider {
 	}
 
 	public async handleOpenFolder(): Promise<void> {
+		const overallStart = Date.now();
+		this.output.clear();
+		this.output.appendLine('=== Начало обработки логов ===');
+		
 		const files = await vscode.window.showOpenDialog({ 
 			canSelectFolders: false, 
 			canSelectFiles: true, 
@@ -110,13 +164,34 @@ export class LogProvider {
 		const selectedFileName = path.basename(selectedFile);
 		const isZipFile = selectedFileName.toLowerCase().endsWith('.zip');
 		
+		this.output.appendLine(`Выбран файл: ${selectedFileName}`);
+		
 		await this.combineLogs(isZipFile ? selectedFile : null);
+		
+		this.output.appendLine('');
+		this.output.appendLine('📄 Открытие документа...');
+		const openStart = Date.now();
 		await this.openCombined();
+		const openTime = Date.now() - openStart;
+		this.output.appendLine(`⏱ Открытие документа: ${openTime}ms`);
+		
 		// Применяем декорации с небольшой задержкой
 		setTimeout(() => {
+			const decorationsStart = Date.now();
 			this.applyDecorations();
+			const decorationsTime = Date.now() - decorationsStart;
+			this.output.appendLine(`⏱ Применение декораций: ${decorationsTime}ms`);
 		}, 100);
+		
+		this.output.appendLine('');
+		this.output.appendLine('🎨 Обновление интерфейса...');
+		const htmlStart = Date.now();
 		this.updateHtml();
+		const htmlTime = Date.now() - htmlStart;
+		this.output.appendLine(`⏱ Обновление HTML: ${htmlTime}ms`);
+		
+		const overallTime = Date.now() - overallStart;
+		this.output.appendLine(`=== Общее время обработки: ${overallTime}ms (${(overallTime / 1000).toFixed(2)}s) ===`);
 	}
 
 	// ==================== HTML Generation Functions ====================
@@ -274,11 +349,16 @@ export class LogProvider {
 				.count{ opacity:0.8; font-size:11px; margin-left:auto; }
 				.sessions .row .left .dot{ width:8px; height:8px; border-radius:50%; background:transparent; border:1px solid transparent; display:inline-block; }
 				.sessions .row .left .dot.active{ background:#ff3b30; border-color:#ff3b30; }
+				.sessions .session-node .children{ overflow:hidden; transition: max-height 0.2s ease-out; }
+				.sessions .session-node .children.collapsed{ display:none; }
 				.sessions ul.transitions{ list-style:none; padding-left:20px; margin:4px 0 0; }
 				.sessions li.transition-row{ display:flex; align-items:center; gap:8px; padding:2px 0; }
 				.sessions li.transition-row .dot{ width:6px; height:6px; border-radius:50%; background:transparent; border:1px solid transparent; display:inline-block; }
 				.sessions li.transition-row .dot.active{ background:#ff3b30; border-color:#ff3b30; }
 				.sessions li.transition-row .transition-jump{ background:transparent; border:none; color: var(--vscode-foreground); cursor:pointer; text-align:left; padding:0; }
+				.sessions .icon.toggle-transitions{ width: 20px; height: 20px; display:inline-flex; align-items:center; justify-content:center; border-radius:3px; transition: transform 0.2s ease; }
+				.sessions .icon.toggle-transitions:hover{ background: var(--vscode-toolbar-hoverBackground); }
+				.sessions .icon.toggle-transitions.collapsed{ transform: rotate(-90deg); }
 				`;
 	}
 
@@ -286,13 +366,31 @@ export class LogProvider {
 	 * Генерация JavaScript для веб-вью
 	 */
 	private generateScript(data: { hasData: boolean; sessions: AppSession[]; channelsTree: any; channelColors: any }, nonce: string): string {
+		let channelsDataJson = '{}';
+		let sessionsJson = '[]';
+		let channelColorsJson = '{}';
+		
+		if (data.hasData) {
+			const jsonStart1 = Date.now();
+			channelsDataJson = JSON.stringify(data.channelsTree);
+			this.output.appendLine(`      ⏱ JSON.stringify(channelsTree): ${Date.now() - jsonStart1}ms (${(channelsDataJson.length / 1024).toFixed(2)} KB)`);
+			
+			const jsonStart2 = Date.now();
+			sessionsJson = JSON.stringify(data.sessions);
+			this.output.appendLine(`      ⏱ JSON.stringify(sessions): ${Date.now() - jsonStart2}ms (${(sessionsJson.length / 1024).toFixed(2)} KB)`);
+			
+			const jsonStart3 = Date.now();
+			channelColorsJson = JSON.stringify(data.channelColors);
+			this.output.appendLine(`      ⏱ JSON.stringify(channelColors): ${Date.now() - jsonStart3}ms (${(channelColorsJson.length / 1024).toFixed(2)} KB)`);
+		}
+		
 		return `<script nonce="${nonce}">
 				const vscode = acquireVsCodeApi();
 				const hasData = ${data.hasData ? 'true' : 'false'};
 				if (hasData){
-					const channelsData = ${JSON.stringify(data.channelsTree)};
-					const sessions = ${JSON.stringify(data.sessions)};
-					const channelColors = ${JSON.stringify(data.channelColors)};
+					const channelsData = ${channelsDataJson};
+					const sessions = ${sessionsJson};
+					const channelColors = ${channelColorsJson};
 					const clone = (obj)=>JSON.parse(JSON.stringify(obj));
 					let activeLocation = null; // { sessionIndex, transitionMessageIndex? }
 					// Handle messages from extension
@@ -689,46 +787,60 @@ export class LogProvider {
 							const node=document.createElement('div');
 							node.className='session-node';
 							node.setAttribute('data-session-index', String(s.index));
-							const row=document.createElement('div');
-							row.className='row';
-						const left=document.createElement('div');
-						left.className='left';
-							const dot=document.createElement('span');
-							dot.className='dot';
-							left.appendChild(dot);
-						
-						// Чекбокс для видимости запуска
-						const cb=document.createElement('input');
-						cb.type='checkbox';
-						cb.className='styledCheck';
-						cb.setAttribute('data-session', String(s.index));
-						cb.checked = true;
-						cb.title='Видимость запуска';
-						cb.addEventListener('change', ()=>{
-							if(cb.checked) row.classList.remove('dimmed');
-							else row.classList.add('dimmed');
-							apply();
+						const row=document.createElement('div');
+						row.className='row';
+					const left=document.createElement('div');
+					left.className='left';
+					
+					// Дочерние переходы состояний
+					const transitions = Array.isArray(s.transitions) ? s.transitions : [];
+					
+					// Кнопка toggle для переходов (только если есть переходы) - в самом начале
+					let toggleBtn = null;
+					if (transitions.length > 0) {
+						toggleBtn=document.createElement('button');
+						toggleBtn.className='icon toggle-transitions collapsed';
+						toggleBtn.title='Показать/скрыть переходы состояний';
+						toggleBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2"/></svg>';
+						left.appendChild(toggleBtn);
+					}
+					
+					const dot=document.createElement('span');
+					dot.className='dot';
+					left.appendChild(dot);
+					
+					// Чекбокс для видимости запуска
+					const cb=document.createElement('input');
+					cb.type='checkbox';
+					cb.className='styledCheck';
+					cb.setAttribute('data-session', String(s.index));
+					cb.checked = true;
+					cb.title='Видимость запуска';
+					cb.addEventListener('change', ()=>{
+						if(cb.checked) row.classList.remove('dimmed');
+						else row.classList.add('dimmed');
+						apply();
+					});
+					left.appendChild(cb);
+					
+					// Кнопка solo
+					const soloBtn=document.createElement('button');
+					soloBtn.className='icon solo';
+					soloBtn.title='Только этот запуск';
+					soloBtn.textContent = 'S';
+					soloBtn.addEventListener('click', ()=>{
+						document.querySelectorAll('.sessions .row').forEach(function(r, idx){
+							const sessionCb = r.querySelector('input[data-session].styledCheck');
+							if(sessionCb){
+								const isCurrent = sessionCb.getAttribute('data-session') === String(s.index);
+								sessionCb.checked = isCurrent;
+								if(isCurrent) r.classList.remove('dimmed');
+								else r.classList.add('dimmed');
+							}
 						});
-						left.appendChild(cb);
-						
-						// Кнопка solo
-						const soloBtn=document.createElement('button');
-						soloBtn.className='icon solo';
-						soloBtn.title='Только этот запуск';
-						soloBtn.textContent = 'S';
-						soloBtn.addEventListener('click', ()=>{
-							document.querySelectorAll('.sessions .row').forEach(function(r, idx){
-								const sessionCb = r.querySelector('input[data-session].styledCheck');
-								if(sessionCb){
-									const isCurrent = sessionCb.getAttribute('data-session') === String(s.index);
-									sessionCb.checked = isCurrent;
-									if(isCurrent) r.classList.remove('dimmed');
-									else r.classList.add('dimmed');
-								}
-							});
-							apply();
-						});
-						left.appendChild(soloBtn);
+						apply();
+					});
+					left.appendChild(soloBtn);
 						
 						const labelContainer=document.createElement('div');
 						labelContainer.style.display='flex';
@@ -767,11 +879,10 @@ export class LogProvider {
 							row.appendChild(right);
 							node.appendChild(row);
 
-							// Дочерние переходы состояний
-							const transitions = Array.isArray(s.transitions) ? s.transitions : [];
+							// Создаем блок с переходами
 							if (transitions.length > 0){
 								const children = document.createElement('div');
-								children.className = 'children';
+								children.className = 'children collapsed'; // По умолчанию свернуто
 								const list = document.createElement('ul');
 								list.className = 'transitions';
 								transitions.forEach(tr=>{
@@ -792,6 +903,14 @@ export class LogProvider {
 								});
 								children.appendChild(list);
 								node.appendChild(children);
+								
+								// Обработчик клика на toggle
+								if (toggleBtn) {
+									toggleBtn.addEventListener('click', ()=>{
+										children.classList.toggle('collapsed');
+										toggleBtn.classList.toggle('collapsed');
+									});
+								}
 							}
 							sessionsDiv.appendChild(node);
 						});
@@ -880,20 +999,42 @@ export class LogProvider {
 	 * Обновление HTML интерфейса
 	 */
 	private updateHtml(): void {
-		if (!this.view) return;
+		if (!this.view) {
+			this.output.appendLine('  ❌ View не инициализирован!');
+			return;
+		}
+		
 		const webview = this.view.webview;
 		const hasFolder = !!this.workspaceFolder;
 		const hasData = !!this.combinedPath;
 		const sessions = this.sessions;
+		
+		this.output.appendLine('  Сериализация дерева каналов...');
+		const treeStart = Date.now();
 		const channelsTree = this.serializeChannelsTree();
+		const treeTime = Date.now() - treeStart;
+		this.output.appendLine(`  ⏱ Сериализация дерева: ${treeTime}ms`);
+		
+		this.output.appendLine('  Подготовка данных о цветах каналов...');
+		const colorsStart = Date.now();
 		const channelColors = Object.fromEntries(this.channelColors.entries());
+		const colorsTime = Date.now() - colorsStart;
+		this.output.appendLine(`  ⏱ Подготовка цветов (${this.channelColors.size} каналов): ${colorsTime}ms`);
+		
+		this.output.appendLine('  Генерация HTML...');
+		const renderStart = Date.now();
 		webview.html = this.renderHtml({ hasFolder, hasData, sessions, channelsTree, channelColors });
+		const renderTime = Date.now() - renderStart;
+		this.output.appendLine(`  ⏱ Генерация HTML: ${renderTime}ms`);
 		
 		// Send initial counts after HTML is loaded
 		if (hasData) {
 			setTimeout(() => {
+				const countsStart = Date.now();
 				const levelCounts = this.calculateLevelCounts();
 				webview.postMessage({ type: 'matchCount', payload: { count: this.parsed.length, levelCounts } });
+				const countsTime = Date.now() - countsStart;
+				this.output.appendLine(`  ⏱ Отправка счетчиков: ${countsTime}ms`);
 			}, 100);
 		}
 	}
@@ -903,6 +1044,27 @@ export class LogProvider {
 	 */
 	private renderHtml(data: { hasFolder: boolean; hasData: boolean; sessions: AppSession[]; channelsTree: any; channelColors: any }): string {
 		const nonce = String(Date.now());
+		
+		const stylesStart = Date.now();
+		const styles = this.generateStyles();
+		this.output.appendLine(`    ⏱ generateStyles: ${Date.now() - stylesStart}ms`);
+		
+		const sessionsStart = Date.now();
+		const sessionsHtml = data.hasData ? this.generateSessionsHtml(data.sessions) : '';
+		this.output.appendLine(`    ⏱ generateSessionsHtml: ${Date.now() - sessionsStart}ms`);
+		
+		const filtersStart = Date.now();
+		const filtersHtml = data.hasData ? this.generateFiltersHtml() : '';
+		this.output.appendLine(`    ⏱ generateFiltersHtml: ${Date.now() - filtersStart}ms`);
+		
+		const channelsStart = Date.now();
+		const channelsHtml = data.hasData ? this.generateChannelsTreeHtml() : '';
+		this.output.appendLine(`    ⏱ generateChannelsTreeHtml: ${Date.now() - channelsStart}ms`);
+		
+		const scriptStart = Date.now();
+		const script = this.generateScript(data, nonce);
+		this.output.appendLine(`    ⏱ generateScript: ${Date.now() - scriptStart}ms`);
+		
 		return `<!DOCTYPE html>
 		<html lang="ru">
 		<head>
@@ -911,14 +1073,14 @@ export class LogProvider {
 			<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 			<title>Homescapes Log Viewer</title>
 			<style>
-${this.generateStyles()}
+${styles}
 			</style>
 		</head>
 		<body>
-			${data.hasData ? this.generateSessionsHtml(data.sessions) : ''}
-			${data.hasData ? this.generateFiltersHtml() : ''}
-			${data.hasData ? this.generateChannelsTreeHtml() : ''}
-			${this.generateScript(data, nonce)}
+			${sessionsHtml}
+			${filtersHtml}
+			${channelsHtml}
+			${script}
 		</body>
 		</html>`;
 	}
@@ -1055,14 +1217,20 @@ ${this.generateStyles()}
 	// ==================== Log Reading and Parsing Functions ====================
 
 	private async combineLogs(zipFilePath: string | null = null): Promise<void> {
+		const combineStart = Date.now();
+		this.output.appendLine('📂 Начало чтения файлов...');
+		
 		if (!this.workspaceFolder) return;
 		const dir = this.workspaceFolder;
 		const combinedParts: string[] = [];
 		
 		if (zipFilePath) {
 			// Режим работы с .zip архивом
+			this.output.appendLine('  Режим: ZIP архив');
+			const zipStart = Date.now();
 			const zip = new AdmZip(zipFilePath);
 			const zipEntries = zip.getEntries();
+			this.output.appendLine(`  ⏱ Открытие ZIP: ${Date.now() - zipStart}ms`);
 			
 			// Ищем log.txt в корне архива
 			const mainLogEntry = zip.getEntry('log.txt');
@@ -1071,6 +1239,8 @@ ${this.generateStyles()}
 			const historyZipEntries = zipEntries.filter((entry: any) => 
 				/^log\.history\d+\.txt\.zip$/.test(entry.entryName)
 			);
+			
+			this.output.appendLine(`  Найдено вложенных архивов: ${historyZipEntries.length}`);
 			
 			// Сортируем history файлы от большего к меньшему
 			historyZipEntries.sort((a: any, b: any) => {
@@ -1082,6 +1252,7 @@ ${this.generateStyles()}
 			// Сначала добавляем вложенные history архивы
 			for (const historyEntry of historyZipEntries) {
 				try {
+					const entryStart = Date.now();
 					const historyZipData = zip.readFile(historyEntry);
 					if (historyZipData) {
 						const historyZip = new AdmZip(historyZipData);
@@ -1089,20 +1260,25 @@ ${this.generateStyles()}
 						if (historyLogEntry) {
 							const content = historyZip.readAsText(historyLogEntry, 'utf8');
 							combinedParts.push(`\n===== BEGIN PART: ${historyEntry.entryName}::log.txt =====\n` + content + `\n===== END PART: ${historyEntry.entryName}::log.txt =====\n`);
+							this.output.appendLine(`  ⏱ ${historyEntry.entryName}: ${Date.now() - entryStart}ms (${(content.length / 1024 / 1024).toFixed(2)} MB)`);
 						}
 					}
 				} catch (err) {
 					console.error(`Ошибка при чтении ${historyEntry.entryName}:`, err);
+					this.output.appendLine(`  ❌ Ошибка при чтении ${historyEntry.entryName}`);
 				}
 			}
 			
 			// Затем добавляем основной log.txt
 			if (mainLogEntry) {
+				const mainStart = Date.now();
 				const content = zip.readAsText(mainLogEntry, 'utf8');
 				combinedParts.push(`\n===== BEGIN PART: log.txt =====\n` + content + `\n===== END PART: log.txt =====\n`);
+				this.output.appendLine(`  ⏱ log.txt: ${Date.now() - mainStart}ms (${(content.length / 1024 / 1024).toFixed(2)} MB)`);
 			}
 		} else {
 			// Режим работы с .txt файлом (старая логика)
+			this.output.appendLine('  Режим: текстовый файл + архивы в папке');
 			const files = fs.readdirSync(dir).filter((f: string) => f === 'log.txt' || /^log\.history\d+\.txt\.zip$/.test(f));
 			// Требуемый порядок: history от большего к меньшему, затем log.txt
 			const history = files.filter((f: string) => f.startsWith('log.history')).sort((a: string, b: string)=>{
@@ -1111,29 +1287,49 @@ ${this.generateStyles()}
 				return nb - na; // По убыванию (от большего к меньшему)
 			});
 			
+			this.output.appendLine(`  Найдено архивов: ${history.length}`);
+			
 			// Сначала добавляем history файлы от большего к меньшему
 			for (const z of history) {
+				const entryStart = Date.now();
 				const zip = new AdmZip(path.join(dir, z));
 				const entry = zip.getEntry('log.txt');
 				if (entry) {
 					const content = zip.readAsText(entry, 'utf8');
 					combinedParts.push(`\n===== BEGIN PART: ${z}::log.txt =====\n` + content + `\n===== END PART: ${z}::log.txt =====\n`);
+					this.output.appendLine(`  ⏱ ${z}: ${Date.now() - entryStart}ms (${(content.length / 1024 / 1024).toFixed(2)} MB)`);
 				}
 			}
 			
 			// Затем добавляем текущий log.txt
 			const currentLogPath = path.join(dir, 'log.txt');
 			if (fs.existsSync(currentLogPath)) {
-				combinedParts.push(`\n===== BEGIN PART: log.txt =====\n` + fs.readFileSync(currentLogPath, 'utf8') + `\n===== END PART: log.txt =====\n`);
+				const mainStart = Date.now();
+				const content = fs.readFileSync(currentLogPath, 'utf8');
+				combinedParts.push(`\n===== BEGIN PART: log.txt =====\n` + content + `\n===== END PART: log.txt =====\n`);
+				this.output.appendLine(`  ⏱ log.txt: ${Date.now() - mainStart}ms (${(content.length / 1024 / 1024).toFixed(2)} MB)`);
 			}
 		}
 		
+		const joinStart = Date.now();
 		const combined = combinedParts.join('\n');
+		const joinTime = Date.now() - joinStart;
+		this.output.appendLine(`  ⏱ Объединение частей: ${joinTime}ms (итого ${(combined.length / 1024 / 1024).toFixed(2)} MB)`);
+		
 		this.originalCombinedContent = combined; // Сохраняем оригинал
 		const outDir = path.join(dir);
 		const outPath = path.join(outDir, 'combined_logs.txt');
+		
+		const writeStart = Date.now();
 		fs.writeFileSync(outPath, combined, 'utf8');
+		const writeTime = Date.now() - writeStart;
+		this.output.appendLine(`  ⏱ Запись файла: ${writeTime}ms`);
+		
 		this.combinedPath = outPath;
+		
+		const combineTime = Date.now() - combineStart;
+		this.output.appendLine(`⏱ Общее время чтения файлов: ${combineTime}ms (${(combineTime / 1000).toFixed(2)}s)`);
+		
 		this.parseCombined(combined);
 	}
 
@@ -1141,15 +1337,22 @@ ${this.generateStyles()}
 	 * Чтение и парсинг логов
 	 */
 	private parseCombined(content: string): void {
+		const parseStart = Date.now();
+		this.output.appendLine('');
+		this.output.appendLine('🔍 Начало парсинга логов...');
+		
 		this.parsed = [];
 		this.sessions = [];
 		this.tsToIndices.clear();
 		this.transitionMessageIndices.clear();
 		this.channelsTree.clear();
 		this.channelColors.clear();
-		// Очистим вывод перед новым парсингом
-		this.output.clear();
+		
+		const splitStart = Date.now();
 		const lines = content.split(/\r?\n/);
+		const splitTime = Date.now() - splitStart;
+		this.output.appendLine(`  Строк в файле: ${lines.length.toLocaleString()}`);
+		this.output.appendLine(`  ⏱ Разделение на строки: ${splitTime}ms`);
 		const startRegex = /^================== APP STARTED =================/;
 		const headPrefixRegex = /^\[(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\]\[(.)\]/;
 		let current: LogMessage | null = null;
@@ -1220,9 +1423,6 @@ ${this.generateStyles()}
 				if (!this.tsToIndices.has(timestamp)) this.tsToIndices.set(timestamp, []);
 				this.tsToIndices.get(timestamp)!.push(current.index);
 
-				// Лог: строка и распарсенные каналы
-				this.output.appendLine(`line ${i + 1}: ${channels.length ? channels.join('>') : '(none)'}`);
-
 				// fill sessions' first ts if missing
 				if (this.sessions.length > 0) {
 					const last = this.sessions[this.sessions.length - 1];
@@ -1256,8 +1456,15 @@ ${this.generateStyles()}
 			}
 		}
 		if (current) this.parsed.push(current);
+		
+		const mainParseTime = Date.now() - parseStart;
+		this.output.appendLine(`  ⏱ Основной парсинг: ${mainParseTime}ms`);
+		this.output.appendLine(`  Сообщений распознано: ${this.parsed.length.toLocaleString()}`);
+		this.output.appendLine(`  Запусков найдено: ${this.sessions.length}`);
+		this.output.appendLine(`  Каналов в дереве: ${this.channelsTree.size}`);
 
 		// После заполнения parsed и sessions — выделяем переходы состояний
+		const transitionsStart = Date.now();
 		const isGSM = (chs: string[]) => chs.includes('GameStateManager');
 		const isChanged = (chs: string[]) => chs.includes('GameStateChanged');
 		const re = /^From\s+(.+?)\s+to\s+(.+)$/;
@@ -1277,13 +1484,53 @@ ${this.generateStyles()}
 				}
 			}
 		}
-		// Итоговую статистику не выводим, чтобы не засорять лог
+		const transitionsTime = Date.now() - transitionsStart;
+		this.output.appendLine(`  ⏱ Поиск переходов состояний: ${transitionsTime}ms`);
+		this.output.appendLine(`  Переходов найдено: ${this.transitionMessageIndices.size}`);
+		
+		const parseTime = Date.now() - parseStart;
+		this.output.appendLine(`⏱ Общее время парсинга: ${parseTime}ms (${(parseTime / 1000).toFixed(2)}s)`);
 	}
 
 	private async openCombined(): Promise<void> {
-		if (!this.combinedPath) return;
+		if (!this.combinedPath) {
+			this.output.appendLine('  ❌ Путь к combined файлу не найден');
+			return;
+		}
+		
+		// Проверяем размер файла
+		const stats = fs.statSync(this.combinedPath);
+		const fileSizeMB = stats.size / (1024 * 1024);
+		this.output.appendLine(`  Размер combined_logs.txt: ${fileSizeMB.toFixed(2)} MB`);
+		
+		// Если файл очень большой (больше 50 MB), предупреждаем и пропускаем автооткрытие
+		if (fileSizeMB > 50) {
+			this.output.appendLine('  ⚠️ Файл слишком большой для автоматического открытия');
+			this.output.appendLine('  💡 Откройте файл вручную: ' + this.combinedPath);
+			vscode.window.showWarningMessage(
+				`Лог файл очень большой (${fileSizeMB.toFixed(2)} MB). Откройте его вручную, если необходимо.`,
+				'Открыть файл'
+			).then(selection => {
+				if (selection === 'Открыть файл') {
+					vscode.workspace.openTextDocument(vscode.Uri.file(this.combinedPath!)).then(doc => {
+						vscode.window.showTextDocument(doc, { preview: false, preserveFocus: true });
+					});
+				}
+			});
+			return;
+		}
+		
+		this.output.appendLine('  Открываем текстовый документ...');
+		const docStart = Date.now();
 		const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(this.combinedPath));
+		const docTime = Date.now() - docStart;
+		this.output.appendLine(`  ⏱ openTextDocument: ${docTime}ms`);
+		
+		this.output.appendLine('  Показываем документ в редакторе...');
+		const showStart = Date.now();
 		await vscode.window.showTextDocument(doc, { preview: false, preserveFocus: true });
+		const showTime = Date.now() - showStart;
+		this.output.appendLine(`  ⏱ showTextDocument: ${showTime}ms`);
 	}
 
 	// ==================== Filter Handling Functions ====================
@@ -1419,6 +1666,9 @@ ${this.generateStyles()}
 	private async reloadAndDecorate(): Promise<void> {
 		if (!this.combinedPath) return;
 		
+		// Сбрасываем версию, так как документ будет перезагружен
+		this.lastDecoratedVersion = -1;
+		
 		// Закрываем все редакторы с этим документом
 		const existingDoc = vscode.workspace.textDocuments.find(d => d.uri.fsPath === this.combinedPath);
 		if (existingDoc) {
@@ -1447,15 +1697,21 @@ ${this.generateStyles()}
 	 * Генерация подсветки синтаксиса лога
 	 */
 	private applyDecorations(): void {
-		const editor = vscode.window.visibleTextEditors.find((e: vscode.TextEditor) => e.document.uri.fsPath === this.combinedPath);
-		if (!editor) {
-			// Listen for when the document is opened
-			const listener = vscode.window.onDidChangeVisibleTextEditors(() => {
-				this.applyDecorations();
-				listener.dispose();
-			});
+		if (this.isApplyingDecorations) {
+			this.output.appendLine('  ⏳ Декорации уже применяются, пропускаем...');
 			return;
 		}
+		
+		const editor = vscode.window.visibleTextEditors.find((e: vscode.TextEditor) => e.document.uri.fsPath === this.combinedPath);
+		if (!editor) {
+			this.output.appendLine('  ⚠️ Редактор с combined_logs.txt не найден, декорации не применены');
+			return;
+		}
+
+		this.isApplyingDecorations = true;
+		this.output.appendLine('  🎨 Применение декораций к документу...');
+		const decorStart = Date.now();
+		const documentVersion = editor.document.version;
 
 		// Очистим старые декорации
 		this.decorationTypes.forEach(dt => dt.dispose());
@@ -1463,6 +1719,7 @@ ${this.generateStyles()}
 
 		const text = editor.document.getText();
 		const lines = text.split(/\r?\n/);
+		this.output.appendLine(`  Обработка ${lines.length.toLocaleString()} строк (версия документа: ${documentVersion})...`);
 
 		// Мапа для декораций каналов по цветам
 		const channelDecorationsByColor = new Map<string, { type: vscode.TextEditorDecorationType; ranges: vscode.Range[] }>();
@@ -1597,7 +1854,18 @@ ${this.generateStyles()}
 			for (const { type, ranges } of channelDecorationsByColor.values()) {
 				editor.setDecorations(type, ranges);
 			}
+			
+			// Сохраняем версию документа, к которой применены декорации
+			this.lastDecoratedVersion = documentVersion;
+			
+			const decorTime = Date.now() - decorStart;
+			this.output.appendLine(`  ✅ Декорации применены: ${decorTime}ms (версия ${documentVersion})`);
+		} else {
+			this.output.appendLine('  ⚠️ Редактор больше не видим, декорации не применены');
 		}
+		
+		// Сбрасываем флаг
+		this.isApplyingDecorations = false;
 	}
 
 	// ==================== Cursor Tracking / Active Location ====================
